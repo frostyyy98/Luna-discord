@@ -8,7 +8,7 @@ const app = express();
 app.get('/', (req, res) => res.send('Luna Discord Bot is active!'));
 app.listen(process.env.PORT || 3000, () => console.log('Web health-check server running.'));
 
-// --- 2. Firebase Initialization (Robust Parser) ---
+// --- 2. Firebase Initialization ---
 let serviceAccount;
 try {
   let rawCreds = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
@@ -66,38 +66,50 @@ async function makeGroqRequest(payload) {
   throw new Error('All Groq API keys have been exhausted or hit rate limits.');
 }
 
-// --- 4. Robust Library Memory System Handlers ---
+// --- 4. Cross-Platform Universal Memory System ---
+
+// Universal Retrieval: Reads both Web Luna (mem_...) and nested category structures
 async function fetchLibraryContext() {
   try {
     const snapshot = await db.ref('memories').once('value');
     const data = snapshot.val();
     if (!data) return "No stored library memories yet.";
 
-    let contextString = "USER MEMORY LIBRARY (Things Luna remembers about you):\n";
-    
-    // Loop through each category (e.g., preferences, identity, goals)
-    Object.keys(data).forEach(category => {
-      const categoryItems = data[category];
-      if (categoryItems) {
-        Object.values(categoryItems).forEach(item => {
-          if (item && item.d) {
-            contextString += `- [${category.toUpperCase()}] ${item.d}\n`;
-          }
-        });
+    let contextString = "SHARED USER MEMORY LIBRARY:\n";
+
+    Object.keys(data).forEach(key => {
+      const item = data[key];
+      if (item) {
+        // If it's a flat memory object (Web Luna style)
+        if (item.d) {
+          const category = item.c ? item.c.toUpperCase() : 'GENERAL';
+          contextString += `- [${category}] ${item.d}\n`;
+        } 
+        // If it's a nested category node
+        else if (typeof item === 'object') {
+          Object.values(item).forEach(subItem => {
+            if (subItem && subItem.d) {
+              const category = subItem.c ? subItem.c.toUpperCase() : key.toUpperCase();
+              contextString += `- [${category}] ${subItem.d}\n`;
+            }
+          });
+        }
       }
     });
+
     return contextString;
   } catch (err) {
-    console.error("Error fetching library context from Firebase:", err.message);
+    console.error("Error fetching library context:", err.message);
     return "Error loading memories.";
   }
 }
 
+// Universal Saver: Saves personal facts directly in Web Luna's memory format
 async function extractAndSaveMemory(userMessage) {
   try {
-    const prompt = `Analyze this message. If it contains explicit user preferences, identity info, goals, or project notes, extract it.
-Return ONLY a raw JSON object without any markdown formatting or extra text: {"t": "Title", "d": "Compressed statement under 120 chars", "c": "preferences", "p": "HIGH"} 
-If irrelevant, return: {"irrelevant": true}
+    const prompt = `Analyze this message. If it contains ANY personal facts about the user (such as pets, names, hobbies, preferences, identity info, goals, or project notes), extract it.
+Return ONLY a raw JSON object without any markdown formatting or extra text: {"t": "Title", "d": "Compressed statement under 120 chars", "c": "preferences", "p": "medium"} 
+If completely irrelevant (like chit-chat or casual greetings), return: {"irrelevant": true}
 Message: "${userMessage}"`;
 
     const data = await makeGroqRequest({
@@ -117,18 +129,21 @@ Message: "${userMessage}"`;
     const parsed = JSON.parse(cleanContent);
 
     if (!parsed.irrelevant && parsed.d) {
-      const category = parsed.c || 'general';
-      const newRef = db.ref(`memories/${category}`).push();
-      await newRef.set({
+      const memoryId = `mem_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      
+      await db.ref(`memories/${memoryId}`).set({
         t: parsed.t || 'Memory',
         d: parsed.d,
-        p: parsed.p || 'MED',
+        c: parsed.c || 'general',
+        p: parsed.p || 'medium',
+        src: 'chatextraction',
         ts: Date.now()
       });
-      console.log(`[Memory Saved Successfully] (${category}): ${parsed.d}`);
+      
+      console.log(`[Memory Saved & Synced] (${parsed.c}): ${parsed.d}`);
     }
   } catch (err) {
-    // Silent catch so it doesn't disrupt standard chat flow
+    console.error('Memory extraction error:', err.message);
   }
 }
 
@@ -149,17 +164,18 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  // Trigger memory extraction in the background
+  // Run memory extraction on every incoming user message
   extractAndSaveMemory(message.content);
 
   try {
     await message.channel.sendTyping();
 
-    // Fetch all available memories from Firebase to ground the chat response
+    // Pull full shared memory context from Firebase
     const libraryContext = await fetchLibraryContext();
 
     const systemPrompt = `You are Luna, a helpful, high-performance personal AI companion. 
-Always use the following user memory library to personalize your answers and recall details about the user when asked:
+CRITICAL RULE: You have access to a Shared User Memory Library below. This library contains absolute facts about the user across all platforms. When the user asks a question about themselves (like their name, pets, favorites, or projects), you MUST check this library and answer using those facts. Never claim you don't know something if it is listed in the library.
+
 ${libraryContext}`;
 
     const chatResponse = await makeGroqRequest({
