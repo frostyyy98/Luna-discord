@@ -1,200 +1,158 @@
+const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { google } = require('googleapis');
+const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
-const { Client, GatewayIntentBits } = require('discord.js');
-const admin = require('firebase-admin');
-const axios = require('axios');
 
-// --- 1. Express Setup for Render 24/7 Uptime ---
 const app = express();
-app.get('/', (req, res) => res.send('Luna Discord Bot is active!'));
-app.listen(process.env.PORT || 3000, () => console.log('Web health-check server running.'));
+const PORT = process.env.PORT || 3000;
 
-// --- 2. Firebase Initialization ---
-let serviceAccount;
-try {
-  let rawCreds = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
-  if (rawCreds.startsWith("'") && rawCreds.endsWith("'")) {
-    rawCreds = rawCreds.slice(1, -1);
-  }
-  serviceAccount = JSON.parse(rawCreds);
-} catch (e) {
-  console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT env var. Ensure it is valid JSON.", e);
-  process.exit(1);
-}
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://luna-7208f-default-rtdb.firebaseio.com"
-});
-const db = admin.database();
-
-// --- 3. Groq API Keys & Rotation System ---
-const groqKeys = process.env.GROQ_KEYS ? process.env.GROQ_KEYS.split(',') : [];
+// ==========================================
+// 1. GEMINI API KEY ROTATION MANAGER
+// ==========================================
+const apiKeysEnv = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
+const geminiKeys = apiKeysEnv.split(',').map(k => k.trim()).filter(Boolean);
 let currentKeyIndex = 0;
 
-function getRotatedKey() {
-  if (groqKeys.length === 0) throw new Error("No Groq keys found in environment variables!");
-  return groqKeys[currentKeyIndex].trim();
+function getRotatedGeminiClient() {
+  if (geminiKeys.length === 0) {
+    throw new Error("No Gemini API keys found in environment variables!");
+  }
+  const apiKey = geminiKeys[currentKeyIndex];
+  currentKeyIndex = (currentKeyIndex + 1) % geminiKeys.length;
+  return new GoogleGenAI({ apiKey });
 }
 
-function rotateKey() {
-  currentKeyIndex = (currentKeyIndex + 1) % groqKeys.length;
-  console.log(`Rate limit or error hit. Rotating to Groq Key Index: ${currentKeyIndex}`);
-}
-
-async function makeGroqRequest(payload) {
+async function generateLunaResponse(promptText) {
   let attempts = 0;
-  while (attempts < groqKeys.length) {
+  while (attempts < geminiKeys.length) {
     try {
-      const apiKey = getRotatedKey();
-      const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        }
+      const ai = getRotatedGeminiClient();
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `You are Luna, Sushant's smart, warm, and friendly AI assistant. Reply naturally and helpfully. Context/Message: ${promptText}` }]
+          }
+        ],
       });
-      return response.data;
+      return response.text || "I'm here, Master! 😊 What's on your mind?";
     } catch (error) {
-      const status = error.response ? error.response.status : null;
-      if (status === 429 || status === 401 || status === 403) {
-        rotateKey();
-        attempts++;
-      } else {
-        throw error;
-      }
+      console.warn(`Gemini key error encountered, rotating key... Error: ${error.message}`);
+      attempts++;
     }
   }
-  throw new Error('All Groq API keys have been exhausted or hit rate limits.');
+  return "Master, I'm currently experiencing high traffic across my API keys. Give me just a moment! 🛡️";
 }
 
-// --- 4. Cross-Platform Universal Memory System ---
 
-// Universal Retrieval: Reads both Web Luna (mem_...) and nested category structures
-async function fetchLibraryContext() {
-  try {
-    const snapshot = await db.ref('memories').once('value');
-    const data = snapshot.val();
-    if (!data) return "No stored library memories yet.";
-
-    let contextString = "SHARED USER MEMORY LIBRARY:\n";
-
-    Object.keys(data).forEach(key => {
-      const item = data[key];
-      if (item) {
-        // If it's a flat memory object (Web Luna style)
-        if (item.d) {
-          const category = item.c ? item.c.toUpperCase() : 'GENERAL';
-          contextString += `- [${category}] ${item.d}\n`;
-        } 
-        // If it's a nested category node
-        else if (typeof item === 'object') {
-          Object.values(item).forEach(subItem => {
-            if (subItem && subItem.d) {
-              const category = subItem.c ? subItem.c.toUpperCase() : key.toUpperCase();
-              contextString += `- [${category}] ${subItem.d}\n`;
-            }
-          });
-        }
-      }
-    });
-
-    return contextString;
-  } catch (err) {
-    console.error("Error fetching library context:", err.message);
-    return "Error loading memories.";
-  }
-}
-
-// Universal Saver: Saves personal facts directly in Web Luna's memory format
-async function extractAndSaveMemory(userMessage) {
-  try {
-    const prompt = `Analyze this message. If it contains ANY personal facts about the user (such as pets, names, hobbies, preferences, identity info, goals, or project notes), extract it.
-Return ONLY a raw JSON object without any markdown formatting or extra text: {"t": "Title", "d": "Compressed statement under 120 chars", "c": "preferences", "p": "medium"} 
-If completely irrelevant (like chit-chat or casual greetings), return: {"irrelevant": true}
-Message: "${userMessage}"`;
-
-    const data = await makeGroqRequest({
-      model: "qwen/qwen3.8-27b",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1
-    });
-
-    const rawContent = data.choices[0].message.content;
-    let cleanContent = rawContent.trim();
-    if (cleanContent.startsWith('```json')) {
-      cleanContent = cleanContent.replace(/^```json/, '').replace(/```$/, '').trim();
-    } else if (cleanContent.startsWith('```')) {
-      cleanContent = cleanContent.replace(/^```/, '').replace(/```$/, '').trim();
-    }
-
-    const parsed = JSON.parse(cleanContent);
-
-    if (!parsed.irrelevant && parsed.d) {
-      const memoryId = `mem_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      
-      await db.ref(`memories/${memoryId}`).set({
-        t: parsed.t || 'Memory',
-        d: parsed.d,
-        c: parsed.c || 'general',
-        p: parsed.p || 'medium',
-        src: 'chatextraction',
-        ts: Date.now()
-      });
-      
-      console.log(`[Memory Saved & Synced] (${parsed.c}): ${parsed.d}`);
-    }
-  } catch (err) {
-    console.error('Memory extraction error:', err.message);
-  }
-}
-
-// --- 5. Discord Bot Initialization ---
-const client = new Client({
+// ==========================================
+// 2. DISCORD BOT SETUP (DMs & Chat)
+// ==========================================
+const discordClient = new Client({ 
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.Guilds, 
+    GatewayIntentBits.GuildMessages, 
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages
+  ],
+  partials: [Partials.Channel, Partials.Message]
 });
 
-client.once('ready', () => {
-  console.log(`Luna Discord Bot logged in as ${client.user.tag}`);
+discordClient.on('ready', () => {
+  console.log(`Luna Discord Bot logged in as ${discordClient.user.tag} 🚀`);
 });
 
-client.on('messageCreate', async (message) => {
+discordClient.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  // Run memory extraction on every incoming user message
-  extractAndSaveMemory(message.content);
-
-  try {
+  // Handle Private Direct Messages
+  if (!message.guild) {
+    console.log(`Received private DM from ${message.author.tag}: ${message.content}`);
     await message.channel.sendTyping();
 
-    // Pull full shared memory context from Firebase
-    const libraryContext = await fetchLibraryContext();
-
-    const systemPrompt = `You are Luna, a helpful, high-performance personal AI companion. 
-CRITICAL RULE: You have access to a Shared User Memory Library below. This library contains absolute facts about the user across all platforms. When the user asks a question about themselves (like their name, pets, favorites, or projects), you MUST check this library and answer using those facts. Never claim you don't know something if it is listed in the library.
-
-${libraryContext}`;
-
-    const chatResponse = await makeGroqRequest({
-      model: "qwen/qwen3.8-27b",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: message.content }
-      ],
-      temperature: 0.7
-    });
-
-    const replyText = chatResponse.choices[0].message.content;
-    await message.reply(replyText);
-
-  } catch (err) {
-    console.error('Chat response error:', err.message);
-    await message.reply("Oops! I encountered an error running through my key rotation system. Please try again.");
+    const lunaReply = await generateLunaResponse(message.content);
+    await message.channel.send(lunaReply);
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+discordClient.login(process.env.DISCORD_BOT_TOKEN);
+
+
+// ==========================================
+// 3. GMAIL ASSISTANT BACKGROUND LOOP
+// ==========================================
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+oauth2Client.setCredentials({
+  refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+});
+
+const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+const PROCESSED_IDS = new Set();
+
+function isPersonalEmail(sender, subject, body) {
+  const text = (subject + " " + body).toLowerCase();
+  const lowSender = sender.toLowerCase();
+
+  if (lowSender.includes("noreply") || lowSender.includes("no-reply") || lowSender.includes("donotreply")) return false;
+  if (text.includes("otp") || text.includes("verification code") || text.includes("security code") || text.includes("invoice")) return false;
   
+  return true;
+}
+
+async function checkAndManageEmails() {
+  try {
+    const listRes = await gmail.users.messages.list({
+      userId: 'me',
+      q: 'is:unread category:primary',
+      maxResults: 3
+    });
+
+    const messages = listRes.data.messages || [];
+    for (const msg of messages) {
+      if (PROCESSED_IDS.has(msg.id)) continue;
+      PROCESSED_IDS.add(msg.id);
+
+      const fullMsg = await gmail.users.messages.get({ userId: 'me', id: msg.id });
+      const headers = fullMsg.data.payload.headers;
+      const sender = headers.find(h => h.name === 'From')?.value || '';
+      const subject = headers.find(h => h.name === 'Subject')?.value || '';
+      const body = fullMsg.data.snippet || '';
+
+      if (!isPersonalEmail(sender, subject, body)) {
+        console.log(`Skipping non-personal mail from: ${sender}`);
+        continue;
+      }
+
+      console.log(`New personal mail detected from ${sender}. Generating Gemini response...`);
+      
+      const emailPrompt = `An email was received from ${sender} with Subject: "${subject}" and Body snippet: "${body}". Write a polite, intelligent reply as Luna.`;
+      const lunaEmailReply = await generateLunaResponse(emailPrompt);
+
+      console.log(`Generated reply for email: ${lunaEmailReply}`);
+    }
+  } catch (error) {
+    console.error("Gmail background loop error:", error.message);
+  }
+}
+
+// Check emails every 3 minutes in the background
+setInterval(checkAndManageEmails, 3 * 60 * 1000);
+
+
+// ==========================================
+// 4. EXPRESS SERVER (Keeps Render Alive)
+// ==========================================
+app.get('/', (req, res) => {
+  res.send('Luna Unified Backend (Discord Bot + Gemini 3.8 Flash + Gmail) is running 24/7! 🌟');
+});
+
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
+              
