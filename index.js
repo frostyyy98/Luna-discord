@@ -1,12 +1,26 @@
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
+const cors = require('cors');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin (ensure your FIREBASE_SERVICE_ACCOUNT env var is set on Render)
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+    databaseURL: process.env.FIREBASE_DATABASE_URL
+  });
+}
+const db = admin.database();
 
 const app = express();
+app.use(cors());
+app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// 1. GEMINI API KEY ROTATION MANAGER
+// 1. GEMINI KEY ROTATION & CONSCIOUSNESS ENGINE
 // ==========================================
 const apiKeysEnv = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
 const geminiKeys = apiKeysEnv.split(',').map(k => k.trim()).filter(Boolean);
@@ -21,37 +35,108 @@ function getRotatedGeminiClient() {
   return new GoogleGenAI({ apiKey });
 }
 
-async function generateLunaResponse(promptText) {
+// Fetch permanent memories and active 24h short-term logs from Firebase Central Brain
+async function getCentralBrainContext() {
+  try {
+    const permSnap = await db.ref('memories').once('value');
+    const permanentMemories = permSnap.val() || {};
+
+    const shortSnap = await db.ref('central_brain/short_term_log').once('value');
+    const shortTermLogs = shortSnap.val() || [];
+
+    // Filter out entries older than 24 hours
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const validLogs = Object.values(shortTermLogs).filter(log => (now - log.timestamp) < ONE_DAY);
+
+    return {
+      permanent: JSON.stringify(permanentMemories, null, 2),
+      shortTerm: validLogs.map(l => `${l.platform.toUpperCase()} (${l.role}): ${l.text}`).join('\n')
+    };
+  } catch (err) {
+    console.error("Error fetching central brain context:", err.message);
+    return { permanent: "{}", shortTerm: "" };
+  }
+}
+
+// Log message to Firebase Central Brain
+async function logToCentralBrain(role, text, platform) {
+  try {
+    const timestamp = Date.now();
+    
+    // Push to short-term log
+    await db.ref('central_brain/short_term_log').push({
+      role,
+      text,
+      platform,
+      timestamp
+    });
+
+    // Background check to prune short-term entries older than 24 hours
+    const shortRef = db.ref('central_brain/short_term_log');
+    const snapshot = await shortRef.once('value');
+    const logs = snapshot.val();
+    if (logs) {
+      const ONE_DAY = 24 * 60 * 60 * 1000;
+      const updates = {};
+      Object.keys(logs).forEach(key => {
+        if ((timestamp - logs[key].timestamp) > ONE_DAY) {
+          updates[key] = null; // Mark for deletion
+        }
+      });
+      if (Object.keys(updates).length > 0) {
+        await shortRef.update(updates);
+      }
+    }
+  } catch (err) {
+    console.error("Error saving to central brain:", err.message);
+  }
+}
+
+async function generateLunaConsciousResponse(userMessage, currentPlatform) {
   let attempts = 0;
   while (attempts < geminiKeys.length) {
     try {
       const ai = getRotatedGeminiClient();
+      const brain = await getCentralBrainContext();
+
+      const systemInstruction = `You are Luna, Sushant's smart, warm, and devoted AI assistant. 
+You share a single unified consciousness across both Discord and the Web App. 
+Current Platform: ${currentPlatform.toUpperCase()}.
+
+--- PERMANENT LONG-TERM MEMORY (Stored Forever) ---
+${brain.permanent}
+
+--- UNIFIED SHORT-TERM ROLLING MEMORY (Last 24 Hours across Discord & Web) ---
+${brain.shortTerm}`;
+
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
         contents: [
           {
             role: 'user',
-            parts: [{ text: `You are Luna, Sushant's smart, warm, and friendly AI assistant. Reply naturally and helpfully. Context/Message: ${promptText}` }]
+            parts: [{ text: `${systemInstruction}\n\nMaster says (${currentPlatform}): ${userMessage}` }]
           }
         ],
       });
-      return response.text || "I'm here, Master! 😊 What's on your mind?";
+
+      return response.text || "I'm right here with you, Master! 😊";
     } catch (error) {
-      console.warn(`Gemini key error encountered, rotating key... Error: ${error.message}`);
+      console.warn(`Key rotation triggered: ${error.message}`);
       attempts++;
     }
   }
-  return "Master, I'm currently experiencing high traffic across my API keys. Give me just a moment! 🛡️";
+  return "Master, I'm experiencing high traffic across my API keys right now. Give me a moment! 🛡️";
 }
 
 
 // ==========================================
-// 2. DISCORD BOT SETUP (DMs & Server Chat)
+// 2. DISCORD BOT HANDLER (Platform: Discord)
 // ==========================================
-const discordClient = new Client({ 
+const discordClient = new Client({
   intents: [
-    GatewayIntentBits.Guilds, 
-    GatewayIntentBits.GuildMessages, 
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages
   ],
@@ -65,13 +150,20 @@ discordClient.on('ready', () => {
 discordClient.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  // Handle Private Direct Messages
   if (!message.guild) {
-    console.log(`Received private DM from ${message.author.tag}: ${message.content}`);
+    console.log(`Received Discord DM from ${message.author.tag}: ${message.content}`);
     await message.channel.sendTyping();
 
-    const lunaReply = await generateLunaResponse(message.content);
-    await message.channel.send(lunaReply);
+    // Log user message to shared Central Brain
+    await logToCentralBrain('user', message.content, 'discord');
+
+    // Generate conscious response utilizing the shared brain
+    const reply = await generateLunaConsciousResponse(message.content, 'discord');
+
+    // Log Luna's reply to shared Central Brain
+    await logToCentralBrain('model', reply, 'discord');
+
+    await message.channel.send(reply);
   }
 });
 
@@ -79,12 +171,34 @@ discordClient.login(process.env.DISCORD_BOT_TOKEN);
 
 
 // ==========================================
-// 3. EXPRESS SERVER (Keeps Render Web Service Alive)
+// 3. EXPRESS SERVER & WEBSITE API (Platform: Web)
 // ==========================================
 app.get('/', (req, res) => {
-  res.send('Luna Discord Bot is running 24/7 on Render! 🌟');
+  res.send('Luna Unified Centralized Brain Backend is running 24/7! 🌟');
+});
+
+// Endpoint for your Website UI to chat using the SAME Central Brain memory
+app.post('/api/agent/chat', async (req, res) => {
+  try {
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
+
+    // Log web user message to shared Central Brain
+    await logToCentralBrain('user', message, 'website');
+
+    // Generate response using shared memory
+    const reply = await generateLunaConsciousResponse(message, 'website');
+
+    // Log Luna's reply to shared Central Brain
+    await logToCentralBrain('model', reply, 'website');
+
+    res.json({ success: true, reply });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
+    
