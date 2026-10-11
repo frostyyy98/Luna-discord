@@ -20,7 +20,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// 1. GEMINI 3.8 FLASH & MULTI-KEY ROTATION ENGINE
+// 1. GEMINI KEY ROTATION & HIGH-TRAFFIC FALLBACK ENGINE
+// Primary: gemini-3.8-flash | Fallback: gemini-3.6-flash
 // ==========================================
 const apiKeysEnv = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
 const geminiKeys = apiKeysEnv.split(',').map(k => k.trim()).filter(Boolean);
@@ -31,33 +32,39 @@ function getRotatedGeminiClient() {
     throw new Error("No Gemini API keys found in environment variables!");
   }
   const apiKey = geminiKeys[currentKeyIndex];
-  // Rotate to the next key for the subsequent request
   currentKeyIndex = (currentKeyIndex + 1) % geminiKeys.length;
   return new GoogleGenAI({ apiKey });
 }
 
-// Strictly uses gemini-3.8-flash with seamless key switching if traffic/rate limits occur
-async function generateWithGemini38Flash(promptText) {
-  let attempts = 0;
-  const maxAttempts = Math.max(geminiKeys.length, 1);
+async function generateWithTrafficFallback(promptText) {
+  // First priority: gemini-3.8-flash. Fallback if high traffic: gemini-3.6-flash
+  const modelsToTry = ['gemini-3.8-flash', 'gemini-3.6-flash'];
 
-  while (attempts < maxAttempts) {
-    try {
-      const ai = getRotatedGeminiClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [{ role: 'user', parts: [{ text: promptText }] }],
-      });
+  for (const model of modelsToTry) {
+    let attempts = 0;
+    const maxAttempts = Math.max(geminiKeys.length, 1);
 
-      if (response && response.text) {
-        return response.text;
+    while (attempts < maxAttempts) {
+      try {
+        const ai = getRotatedGeminiClient();
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: [{ role: 'user', parts: [{ text: promptText }] }],
+        });
+
+        if (response && response.text) {
+          if (model === 'gemini-3.6-flash') {
+            console.log("⚡ Notice: Successfully handled request using Gemini 3.6 Flash fallback due to high demand on 3.8 Flash.");
+          }
+          return response.text;
+        }
+      } catch (error) {
+        console.warn(`[${model}] Traffic/Key issue on key index ${(currentKeyIndex - 1 + geminiKeys.length) % geminiKeys.length}: ${error.message}`);
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
-    } catch (error) {
-      console.warn(`Key rotation triggered on gemini-3.8-flash: ${error.message}. Switching key and retrying...`);
-      attempts++;
-      // Brief pause before trying the next key
-      await new Promise(resolve => setTimeout(resolve, 500));
     }
+    console.warn(`All API keys failed for ${model}. Attempting next model...`);
   }
   return null;
 }
@@ -87,7 +94,7 @@ async function getCentralBrainContext() {
   }
 }
 
-// Intelligent Memory Router: Saves short-term chat and automatically extracts/saves permanent facts
+// Intelligent Memory Router: Saves short-term log and automatically detects & saves permanent facts
 async function processAndStoreMemory(userMessage, platform) {
   try {
     const timestamp = Date.now();
@@ -100,25 +107,28 @@ async function processAndStoreMemory(userMessage, platform) {
       timestamp
     });
 
-    // 2. Ask Gemini 3.8 Flash to evaluate if this is a permanent fact worth storing forever
+    // 2. Evaluate if this message contains a permanent fact worth storing forever
     const analysisPrompt = `Analyze this user message: "${userMessage}". 
 Does it contain a core personal fact, preference, relationship note, project rule, or milestone that should be remembered FOREVER? 
 If yes, output ONLY a JSON object with this exact format: {"save": true, "category": "category_name", "fact": "short factual statement"}.
 If no, output ONLY: {"save": false}`;
 
-    const analysisResult = await generateWithGemini38Flash(analysisPrompt);
+    const analysisResult = await generateWithTrafficFallback(analysisPrompt);
     if (analysisResult) {
       const cleanedJson = analysisResult.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleanedJson);
-      
-      if (parsed && parsed.save && parsed.fact) {
-        const category = parsed.category || 'general_facts';
-        await db.ref(`memories/${category}`).push({
-          fact: parsed.fact,
-          sourcePlatform: platform.toLowerCase(),
-          timestamp: new Date().toISOString()
-        });
-        console.log(`[Permanent Memory Saved] Category: ${category} | Fact: ${parsed.fact}`);
+      try {
+        const parsed = JSON.parse(cleanedJson);
+        if (parsed && parsed.save && parsed.fact) {
+          const category = parsed.category || 'general_facts';
+          await db.ref(`memories/${category}`).push({
+            fact: parsed.fact,
+            sourcePlatform: platform.toLowerCase(),
+            timestamp: new Date().toISOString()
+          });
+          console.log(`[Permanent Memory Saved] Category: ${category} | Fact: ${parsed.fact}`);
+        }
+      } catch (jsonErr) {
+        // Ignored if output was simple non-JSON
       }
     }
 
@@ -158,7 +168,7 @@ ${brain.shortTerm}
 
 Master says (${currentPlatform}): ${userMessage}`;
 
-  const reply = await generateWithGemini38Flash(systemInstruction);
+  const reply = await generateWithTrafficFallback(systemInstruction);
   return reply || "I'm right here with you, Master! 😊";
 }
 
@@ -189,7 +199,7 @@ discordClient.on('messageCreate', async (message) => {
     // Process user message (short-term log + permanent memory evaluation)
     await processAndStoreMemory(message.content, 'discord');
 
-    // Generate response using Gemini 3.8 Flash
+    // Generate response using 3.8 Flash (or 3.6 Flash fallback)
     const reply = await generateLunaConsciousResponse(message.content, 'discord');
 
     // Log Luna's reply to short-term log
@@ -222,7 +232,7 @@ app.post('/api/agent/chat', async (req, res) => {
     // Process web user message (short-term log + permanent memory evaluation)
     await processAndStoreMemory(message, 'website');
 
-    // Generate response using Gemini 3.8 Flash
+    // Generate response using 3.8 Flash (or 3.6 Flash fallback)
     const reply = await generateLunaConsciousResponse(message, 'website');
 
     // Log Luna's reply to short-term log
@@ -242,4 +252,4 @@ app.post('/api/agent/chat', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
-        
+    
