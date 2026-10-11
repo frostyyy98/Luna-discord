@@ -1,4 +1,4 @@
-lconst { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 const cors = require('cors');
@@ -51,7 +51,7 @@ async function getCentralBrainContext() {
 
     return {
       permanent: JSON.stringify(permanentMemories, null, 2),
-      shortTerm: validLogs.map(l => `${l.platform.toUpperCase()} (${l.role}): ${l.text}`).join('\n')
+      shortTerm: validLogs.map(l => ` (${l.role}): ${l.text}`).join('\n')
     };
   } catch (err) {
     console.error("Error fetching central brain context:", err.message);
@@ -59,19 +59,19 @@ async function getCentralBrainContext() {
   }
 }
 
-// Log message to Firebase Central Brain with write confirmation and pruning
+// Log message to Firebase Central Brain with platform tracking for your AI builder
 async function logToCentralBrain(role, text, platform) {
   try {
     const timestamp = Date.now();
     
-    // Push to short-term log
+    // Explicitly tag platform ('discord' or 'website') so your web builder can filter easily
     const newRef = await db.ref('central_brain/short_term_log').push({
       role,
       text,
-      platform,
+      platform: platform.toLowerCase(), // 'discord' or 'website'
       timestamp
     });
-    console.log(`Successfully wrote ${platform} message to Firebase Central Brain. Key: ${newRef.key}`);
+    console.log(`Successfully wrote [${platform.toUpperCase()}] message to Firebase Central Brain. Key: ${newRef.key}`);
 
     // Background check to prune short-term entries older than 24 hours
     const shortRef = db.ref('central_brain/short_term_log');
@@ -156,13 +156,13 @@ discordClient.on('messageCreate', async (message) => {
     console.log(`Received Discord DM from ${message.author.tag}: ${message.content}`);
     await message.channel.sendTyping();
 
-    // Log user message to shared Central Brain
+    // Log user message to shared Central Brain tagged as 'discord'
     await logToCentralBrain('user', message.content, 'discord');
 
     // Generate conscious response utilizing the shared brain
     const reply = await generateLunaConsciousResponse(message.content, 'discord');
 
-    // Log Luna's reply to shared Central Brain
+    // Log Luna's reply to shared Central Brain tagged as 'discord'
     await logToCentralBrain('model', reply, 'discord');
 
     await message.channel.send(reply);
@@ -185,13 +185,13 @@ app.post('/api/agent/chat', async (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
 
-    // Log web user message to shared Central Brain
+    // Log web user message to shared Central Brain tagged as 'website'
     await logToCentralBrain('user', message, 'website');
 
     // Generate response using shared memory
     const reply = await generateLunaConsciousResponse(message, 'website');
 
-    // Log Luna's reply to shared Central Brain
+    // Log Luna's reply to shared Central Brain tagged as 'website'
     await logToCentralBrain('model', reply, 'website');
 
     res.json({ success: true, reply });
@@ -203,4 +203,4 @@ app.post('/api/agent/chat', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
-        
+    
