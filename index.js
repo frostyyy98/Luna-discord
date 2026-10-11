@@ -1,5 +1,4 @@
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
-const { google } = require('googleapis');
 const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 
@@ -47,7 +46,7 @@ async function generateLunaResponse(promptText) {
 
 
 // ==========================================
-// 2. DISCORD BOT SETUP (DMs & Chat)
+// 2. DISCORD BOT SETUP (DMs & Server Chat)
 // ==========================================
 const discordClient = new Client({ 
   intents: [
@@ -80,79 +79,12 @@ discordClient.login(process.env.DISCORD_BOT_TOKEN);
 
 
 // ==========================================
-// 3. GMAIL ASSISTANT BACKGROUND LOOP
-// ==========================================
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
-);
-
-oauth2Client.setCredentials({
-  refresh_token: process.env.GOOGLE_REFRESH_TOKEN
-});
-
-const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-const PROCESSED_IDS = new Set();
-
-function isPersonalEmail(sender, subject, body) {
-  const text = (subject + " " + body).toLowerCase();
-  const lowSender = sender.toLowerCase();
-
-  if (lowSender.includes("noreply") || lowSender.includes("no-reply") || lowSender.includes("donotreply")) return false;
-  if (text.includes("otp") || text.includes("verification code") || text.includes("security code") || text.includes("invoice")) return false;
-  
-  return true;
-}
-
-async function checkAndManageEmails() {
-  try {
-    const listRes = await gmail.users.messages.list({
-      userId: 'me',
-      q: 'is:unread category:primary',
-      maxResults: 3
-    });
-
-    const messages = listRes.data.messages || [];
-    for (const msg of messages) {
-      if (PROCESSED_IDS.has(msg.id)) continue;
-      PROCESSED_IDS.add(msg.id);
-
-      const fullMsg = await gmail.users.messages.get({ userId: 'me', id: msg.id });
-      const headers = fullMsg.data.payload.headers;
-      const sender = headers.find(h => h.name === 'From')?.value || '';
-      const subject = headers.find(h => h.name === 'Subject')?.value || '';
-      const body = fullMsg.data.snippet || '';
-
-      if (!isPersonalEmail(sender, subject, body)) {
-        console.log(`Skipping non-personal mail from: ${sender}`);
-        continue;
-      }
-
-      console.log(`New personal mail detected from ${sender}. Generating Gemini response...`);
-      
-      const emailPrompt = `An email was received from ${sender} with Subject: "${subject}" and Body snippet: "${body}". Write a polite, intelligent reply as Luna.`;
-      const lunaEmailReply = await generateLunaResponse(emailPrompt);
-
-      console.log(`Generated reply for email: ${lunaEmailReply}`);
-    }
-  } catch (error) {
-    console.error("Gmail background loop error:", error.message);
-  }
-}
-
-// Check emails every 3 minutes in the background
-setInterval(checkAndManageEmails, 3 * 60 * 1000);
-
-
-// ==========================================
-// 4. EXPRESS SERVER (Keeps Render Alive)
+// 3. EXPRESS SERVER (Keeps Render Web Service Alive)
 // ==========================================
 app.get('/', (req, res) => {
-  res.send('Luna Unified Backend (Discord Bot + Gemini 3.8 Flash + Gmail) is running 24/7! 🌟');
+  res.send('Luna Discord Bot is running 24/7 on Render! 🌟');
 });
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
-              
