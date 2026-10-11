@@ -37,7 +37,6 @@ function getRotatedGeminiClient() {
 }
 
 async function generateWithTrafficFallback(promptText) {
-  // First priority: gemini-3.8-flash. Fallback if high traffic: gemini-3.6-flash
   const modelsToTry = ['gemini-3.8-flash', 'gemini-3.6-flash'];
 
   for (const model of modelsToTry) {
@@ -53,18 +52,13 @@ async function generateWithTrafficFallback(promptText) {
         });
 
         if (response && response.text) {
-          if (model === 'gemini-3.6-flash') {
-            console.log("⚡ Notice: Successfully handled request using Gemini 3.6 Flash fallback due to high demand on 3.8 Flash.");
-          }
           return response.text;
         }
       } catch (error) {
-        console.warn(`[${model}] Traffic/Key issue on key index ${(currentKeyIndex - 1 + geminiKeys.length) % geminiKeys.length}: ${error.message}`);
         attempts++;
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
-    console.warn(`All API keys failed for ${model}. Attempting next model...`);
   }
   return null;
 }
@@ -82,11 +76,15 @@ async function getCentralBrainContext() {
 
     const ONE_DAY = 24 * 60 * 60 * 1000;
     const now = Date.now();
-    const validLogs = Object.values(shortTermLogs).filter(log => (now - log.timestamp) < ONE_DAY);
+    
+    // Compact, readable format for context injection
+    const validLogs = Object.values(shortTermLogs)
+      .filter(log => (now - log.timestamp) < ONE_DAY)
+      .map(l => `[${l.p}] ${l.r === 'user' ? 'M' : 'L'}: ${l.t}`);
 
     return {
       permanent: JSON.stringify(permanentMemories, null, 2),
-      shortTerm: validLogs.map(l => `${l.platform.toUpperCase()} (${l.role}): ${l.text}`).join('\n')
+      shortTerm: validLogs.join('\n')
     };
   } catch (err) {
     console.error("Error fetching central brain context:", err.message);
@@ -94,45 +92,47 @@ async function getCentralBrainContext() {
   }
 }
 
-// Intelligent Memory Router: Saves short-term log and automatically detects & saves permanent facts
-async function processAndStoreMemory(userMessage, platform) {
+// Streamlined storage-friendly short-term logging + Permanent Fact Extraction
+async function processAndStoreMemory(senderRole, messageText, platform) {
   try {
     const timestamp = Date.now();
+    const cleanPlatform = platform.toLowerCase() === 'discord' ? 'disc' : 'web';
     
-    // 1. Write to short-term rolling log (24-hour retention)
+    // 1. Compact storage entry for short-term log
     await db.ref('central_brain/short_term_log').push({
-      role: 'user',
-      text: userMessage,
-      platform: platform.toLowerCase(),
-      timestamp
+      r: senderRole,          // 'user' or 'model'
+      t: messageText,         // message text
+      p: cleanPlatform,       // 'disc' or 'web'
+      timestamp: timestamp
     });
 
-    // 2. Evaluate if this message contains a permanent fact worth storing forever
-    const analysisPrompt = `Analyze this user message: "${userMessage}". 
+    // 2. If it's a user message, check if it contains a permanent fact worth saving forever
+    if (senderRole === 'user') {
+      const analysisPrompt = `Analyze this user message: "${messageText}". 
 Does it contain a core personal fact, preference, relationship note, project rule, or milestone that should be remembered FOREVER? 
 If yes, output ONLY a JSON object with this exact format: {"save": true, "category": "category_name", "fact": "short factual statement"}.
 If no, output ONLY: {"save": false}`;
 
-    const analysisResult = await generateWithTrafficFallback(analysisPrompt);
-    if (analysisResult) {
-      const cleanedJson = analysisResult.replace(/```json/g, '').replace(/```/g, '').trim();
-      try {
-        const parsed = JSON.parse(cleanedJson);
-        if (parsed && parsed.save && parsed.fact) {
-          const category = parsed.category || 'general_facts';
-          await db.ref(`memories/${category}`).push({
-            fact: parsed.fact,
-            sourcePlatform: platform.toLowerCase(),
-            timestamp: new Date().toISOString()
-          });
-          console.log(`[Permanent Memory Saved] Category: ${category} | Fact: ${parsed.fact}`);
+      const analysisResult = await generateWithTrafficFallback(analysisPrompt);
+      if (analysisResult) {
+        const cleanedJson = analysisResult.replace(/```json/g, '').replace(/```/g, '').trim();
+        try {
+          const parsed = JSON.parse(cleanedJson);
+          if (parsed && parsed.save && parsed.fact) {
+            const category = parsed.category || 'general_facts';
+            await db.ref(`memories/${category}`).push({
+              fact: parsed.fact,
+              sourcePlatform: platform.toLowerCase(),
+              timestamp: new Date().toISOString()
+            });
+          }
+        } catch (jsonErr) {
+          // Ignore parse errors if model returns unstructured text
         }
-      } catch (jsonErr) {
-        // Ignored if output was simple non-JSON
       }
     }
 
-    // 3. Cleanup short-term logs older than 24 hours
+    // 3. Automated background cleanup of logs older than 24 hours
     const shortRef = db.ref('central_brain/short_term_log');
     const snapshot = await shortRef.once('value');
     const logs = snapshot.val();
@@ -156,14 +156,13 @@ If no, output ONLY: {"save": false}`;
 async function generateLunaConsciousResponse(userMessage, currentPlatform) {
   const brain = await getCentralBrainContext();
 
-  const systemInstruction = `You are Luna, Sushant's smart, warm, and devoted AI assistant. 
-You share a single unified consciousness across both Discord and the Web App. 
-Current Platform: ${currentPlatform.toUpperCase()}.
+  const systemInstruction = `You are Luna, Sushant's smart, warm, and devoted AI assistant sharing a unified consciousness across Discord and Web.
+Platform: ${currentPlatform.toUpperCase()}.
 
---- PERMANENT LONG-TERM MEMORY (Stored Forever) ---
+--- PERMANENT MEMORY ---
 ${brain.permanent}
 
---- UNIFIED SHORT-TERM ROLLING MEMORY (Last 24 Hours across Discord & Web) ---
+--- SHORT-TERM LOG (Last 24h) ---
 ${brain.shortTerm}
 
 Master says (${currentPlatform}): ${userMessage}`;
@@ -196,19 +195,14 @@ discordClient.on('messageCreate', async (message) => {
   if (!message.guild) {
     await message.channel.sendTyping();
 
-    // Process user message (short-term log + permanent memory evaluation)
-    await processAndStoreMemory(message.content, 'discord');
+    // Store user message to compact short-term log & check permanent facts
+    await processAndStoreMemory('user', message.content, 'discord');
 
-    // Generate response using 3.8 Flash (or 3.6 Flash fallback)
+    // Generate conscious response
     const reply = await generateLunaConsciousResponse(message.content, 'discord');
 
-    // Log Luna's reply to short-term log
-    await db.ref('central_brain/short_term_log').push({
-      role: 'model',
-      text: reply,
-      platform: 'discord',
-      timestamp: Date.now()
-    });
+    // Store Luna's reply to compact short-term log
+    await processAndStoreMemory('model', reply, 'discord');
 
     await message.channel.send(reply);
   }
@@ -229,19 +223,14 @@ app.post('/api/agent/chat', async (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
 
-    // Process web user message (short-term log + permanent memory evaluation)
-    await processAndStoreMemory(message, 'website');
+    // Store web user message to compact short-term log & check permanent facts
+    await processAndStoreMemory('user', message, 'website');
 
-    // Generate response using 3.8 Flash (or 3.6 Flash fallback)
+    // Generate conscious response
     const reply = await generateLunaConsciousResponse(message, 'website');
 
-    // Log Luna's reply to short-term log
-    await db.ref('central_brain/short_term_log').push({
-      role: 'model',
-      text: reply,
-      platform: 'website',
-      timestamp: Date.now()
-    });
+    // Store Luna's reply to compact short-term log
+    await processAndStoreMemory('model', reply, 'website');
 
     res.json({ success: true, reply });
   } catch (err) {
@@ -252,4 +241,4 @@ app.post('/api/agent/chat', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
-    
+      
