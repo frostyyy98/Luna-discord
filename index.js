@@ -1,10 +1,10 @@
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+lconst { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin (ensure your FIREBASE_SERVICE_ACCOUNT env var is set on Render)
+// Initialize Firebase Admin
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
@@ -42,7 +42,7 @@ async function getCentralBrainContext() {
     const permanentMemories = permSnap.val() || {};
 
     const shortSnap = await db.ref('central_brain/short_term_log').once('value');
-    const shortTermLogs = shortSnap.val() || [];
+    const shortTermLogs = shortSnap.val() || {};
 
     // Filter out entries older than 24 hours
     const ONE_DAY = 24 * 60 * 60 * 1000;
@@ -59,18 +59,19 @@ async function getCentralBrainContext() {
   }
 }
 
-// Log message to Firebase Central Brain
+// Log message to Firebase Central Brain with write confirmation and pruning
 async function logToCentralBrain(role, text, platform) {
   try {
     const timestamp = Date.now();
     
     // Push to short-term log
-    await db.ref('central_brain/short_term_log').push({
+    const newRef = await db.ref('central_brain/short_term_log').push({
       role,
       text,
       platform,
       timestamp
     });
+    console.log(`Successfully wrote ${platform} message to Firebase Central Brain. Key: ${newRef.key}`);
 
     // Background check to prune short-term entries older than 24 hours
     const shortRef = db.ref('central_brain/short_term_log');
@@ -86,10 +87,11 @@ async function logToCentralBrain(role, text, platform) {
       });
       if (Object.keys(updates).length > 0) {
         await shortRef.update(updates);
+        console.log("Pruned expired short-term logs older than 24 hours.");
       }
     }
   } catch (err) {
-    console.error("Error saving to central brain:", err.message);
+    console.error("CRITICAL ERROR writing to Central Brain in Firebase:", err.message);
   }
 }
 
@@ -201,4 +203,4 @@ app.post('/api/agent/chat', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
-    
+        
