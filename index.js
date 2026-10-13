@@ -3,6 +3,7 @@ const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const axios = require('axios'); // Added for Instagram API calls
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
@@ -96,13 +97,13 @@ async function getCentralBrainContext() {
 async function processAndStoreMemory(senderRole, messageText, platform) {
   try {
     const timestamp = Date.now();
-    const cleanPlatform = platform.toLowerCase() === 'discord' ? 'disc' : 'web';
+    const cleanPlatform = platform.toLowerCase() === 'discord' ? 'disc' : (platform.toLowerCase() === 'instagram' ? 'insta' : 'web');
     
     // 1. Compact storage entry for short-term log
     await db.ref('central_brain/short_term_log').push({
       r: senderRole,          // 'user' or 'model'
       t: messageText,         // message text
-      p: cleanPlatform,       // 'disc' or 'web'
+      p: cleanPlatform,       // 'disc', 'insta', or 'web'
       timestamp: timestamp
     });
 
@@ -156,7 +157,7 @@ If no, output ONLY: {"save": false}`;
 async function generateLunaConsciousResponse(userMessage, currentPlatform) {
   const brain = await getCentralBrainContext();
 
-  const systemInstruction = `You are Luna, Sushant's smart, warm, and devoted AI assistant sharing a unified consciousness across Discord and Web.
+  const systemInstruction = `You are Luna, Sushant's smart, warm, and devoted AI assistant sharing a unified consciousness across Discord, Instagram, and Web.
 Platform: ${currentPlatform.toUpperCase()}.
 
 --- PERMANENT MEMORY ---
@@ -212,7 +213,89 @@ discordClient.login(process.env.DISCORD_BOT_TOKEN);
 
 
 // ==========================================
-// 4. EXPRESS SERVER & WEBSITE API (Platform: Web)
+// 4. INSTAGRAM WEBHOOK HANDLERS (Platform: Instagram)
+// ==========================================
+
+// Meta Webhook Handshake Verification
+app.get('/api/instagram/webhook', (req, res) => {
+  const VERIFY_TOKEN = process.env.INSTAGRAM_VERIFY_TOKEN || 'luna_secret_verify_2026';
+  
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('[Instagram] Webhook verified successfully!');
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// Incoming Instagram DM Event Listener & Unified AI Router
+app.post('/api/instagram/webhook', async (req, res) => {
+  // Acknowledge receipt to Meta immediately to prevent timeout retries
+  res.status(200).send('EVENT_RECEIVED');
+
+  const body = req.body;
+
+  if (body.object === 'instagram') {
+    for (const entry of body.entry) {
+      if (!entry.messaging) continue;
+      
+      for (const messagingEvent of entry.messaging) {
+        // Process text DMs and ignore bot echo messages
+        if (messagingEvent.message && messagingEvent.message.text && !messagingEvent.message.is_echo) {
+          const senderId = messagingEvent.sender.id;
+          const userMessage = messagingEvent.message.text;
+
+          console.log(`[Instagram DM] Received from ${senderId}: ${userMessage}`);
+
+          try {
+            // 1. Store user message in Firebase Central Brain memory & check permanent facts
+            await processAndStoreMemory('user', userMessage, 'instagram');
+
+            // 2. Generate unified conscious response via Gemini key rotation & fallback
+            const reply = await generateLunaConsciousResponse(userMessage, 'instagram');
+
+            // 3. Store Luna's reply in Firebase short-term log
+            await processAndStoreMemory('model', reply, 'instagram');
+
+            // 4. Send response back to Instagram user via Graph API
+            await replyToInstagramUser(senderId, reply);
+          } catch (err) {
+            console.error('[Instagram DM] Error processing message pipeline:', err.message);
+          }
+        }
+      }
+    }
+  }
+});
+
+// Helper Function: Send DM reply via Meta Graph API
+async function replyToInstagramUser(recipientId, text) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/me/messages`,
+      {
+        recipient: { id: recipientId },
+        message: { text: text },
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.INSTAGRAM_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    console.log('[Instagram DM] Reply sent successfully!');
+  } catch (error) {
+    console.error('[Instagram DM API Error]:', error.response?.data || error.message);
+  }
+}
+
+
+// ==========================================
+// 5. EXPRESS SERVER & WEBSITE API (Platform: Web)
 // ==========================================
 app.get('/', (req, res) => {
   res.send('Luna Unified Centralized Brain Backend is running 24/7! 🌟');
@@ -241,4 +324,4 @@ app.post('/api/agent/chat', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
-      
+  
