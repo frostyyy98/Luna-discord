@@ -3,7 +3,7 @@ const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
-const axios = require('axios'); // Added for Instagram API calls
+const axios = require('axios');
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
@@ -21,8 +21,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// 1. GEMINI KEY ROTATION & HIGH-TRAFFIC FALLBACK ENGINE
-// Primary: gemini-3.8-flash | Fallback: gemini-3.6-flash
+// 1. GEMINI KEY ROTATION & FALLBACK ENGINE
 // ==========================================
 const apiKeysEnv = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
 const geminiKeys = apiKeysEnv.split(',').map(k => k.trim()).filter(Boolean);
@@ -78,7 +77,6 @@ async function getCentralBrainContext() {
     const ONE_DAY = 24 * 60 * 60 * 1000;
     const now = Date.now();
     
-    // Compact, readable format for context injection
     const validLogs = Object.values(shortTermLogs)
       .filter(log => (now - log.timestamp) < ONE_DAY)
       .map(l => `[${l.p}] ${l.r === 'user' ? 'M' : 'L'}: ${l.t}`);
@@ -93,21 +91,18 @@ async function getCentralBrainContext() {
   }
 }
 
-// Streamlined storage-friendly short-term logging + Permanent Fact Extraction
 async function processAndStoreMemory(senderRole, messageText, platform) {
   try {
     const timestamp = Date.now();
     const cleanPlatform = platform.toLowerCase() === 'discord' ? 'disc' : (platform.toLowerCase() === 'instagram' ? 'insta' : 'web');
     
-    // 1. Compact storage entry for short-term log
     await db.ref('central_brain/short_term_log').push({
-      r: senderRole,          // 'user' or 'model'
-      t: messageText,         // message text
-      p: cleanPlatform,       // 'disc', 'insta', or 'web'
+      r: senderRole,
+      t: messageText,
+      p: cleanPlatform,
       timestamp: timestamp
     });
 
-    // 2. If it's a user message, check if it contains a permanent fact worth saving forever
     if (senderRole === 'user') {
       const analysisPrompt = `Analyze this user message: "${messageText}". 
 Does it contain a core personal fact, preference, relationship note, project rule, or milestone that should be remembered FOREVER? 
@@ -128,12 +123,12 @@ If no, output ONLY: {"save": false}`;
             });
           }
         } catch (jsonErr) {
-          // Ignore parse errors if model returns unstructured text
+          // Ignore JSON parse errors
         }
       }
     }
 
-    // 3. Automated background cleanup of logs older than 24 hours
+    // Cleanup short-term logs older than 24 hours
     const shortRef = db.ref('central_brain/short_term_log');
     const snapshot = await shortRef.once('value');
     const logs = snapshot.val();
@@ -172,9 +167,8 @@ Master says (${currentPlatform}): ${userMessage}`;
   return reply || "I'm right here with you, Master! 😊";
 }
 
-
 // ==========================================
-// 3. DISCORD BOT HANDLER (Platform: Discord)
+// 3. DISCORD BOT HANDLER
 // ==========================================
 const discordClient = new Client({
   intents: [
@@ -195,28 +189,20 @@ discordClient.on('messageCreate', async (message) => {
 
   if (!message.guild) {
     await message.channel.sendTyping();
-
-    // Store user message to compact short-term log & check permanent facts
     await processAndStoreMemory('user', message.content, 'discord');
-
-    // Generate conscious response
     const reply = await generateLunaConsciousResponse(message.content, 'discord');
-
-    // Store Luna's reply to compact short-term log
     await processAndStoreMemory('model', reply, 'discord');
-
     await message.channel.send(reply);
   }
 });
 
 discordClient.login(process.env.DISCORD_BOT_TOKEN);
 
-
 // ==========================================
-// 4. INSTAGRAM WEBHOOK HANDLERS (Platform: Instagram)
+// 4. INSTAGRAM WEBHOOK HANDLERS
 // ==========================================
 
-// Meta Webhook Handshake Verification
+// Meta Webhook Verification
 app.get('/api/instagram/webhook', (req, res) => {
   const VERIFY_TOKEN = process.env.INSTAGRAM_VERIFY_TOKEN || 'luna_secret_verify_2026';
   
@@ -231,58 +217,55 @@ app.get('/api/instagram/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-// Incoming Instagram DM Event Listener & Unified AI Router
-app.post('/api/instagram/webhook', async (req, res) => {
-  // Acknowledge receipt to Meta immediately to prevent timeout retries
+// Incoming Instagram DM Event Listener
+app.post('/api/instagram/webhook', (req, res) => {
+  // 1. Instantly respond 200 OK to Meta to acknowledge receipt
   res.status(200).send('EVENT_RECEIVED');
 
   const body = req.body;
 
-  if (body.object === 'instagram') {
-    for (const entry of body.entry) {
-      if (!entry.messaging) continue;
-      
-      for (const messagingEvent of entry.messaging) {
-        // Process text DMs and ignore bot echo messages
-        if (messagingEvent.message && messagingEvent.message.text && !messagingEvent.message.is_echo) {
-          const senderId = messagingEvent.sender.id;
-          const userMessage = messagingEvent.message.text;
+  // 2. Process message asynchronously in background
+  if (body.object === 'instagram' || body.object === 'page') {
+    (async () => {
+      for (const entry of body.entry || []) {
+        if (!entry.messaging) continue;
+        
+        for (const messagingEvent of entry.messaging) {
+          if (messagingEvent.message && messagingEvent.message.text && !messagingEvent.message.is_echo) {
+            const senderId = messagingEvent.sender.id;
+            const userMessage = messagingEvent.message.text;
 
-          console.log(`[Instagram DM] Received from ${senderId}: ${userMessage}`);
+            console.log(`[Instagram DM] Received from ${senderId}: ${userMessage}`);
 
-          try {
-            // 1. Store user message in Firebase Central Brain memory & check permanent facts
-            await processAndStoreMemory('user', userMessage, 'instagram');
-
-            // 2. Generate unified conscious response via Gemini key rotation & fallback
-            const reply = await generateLunaConsciousResponse(userMessage, 'instagram');
-
-            // 3. Store Luna's reply in Firebase short-term log
-            await processAndStoreMemory('model', reply, 'instagram');
-
-            // 4. Send response back to Instagram user via Graph API
-            await replyToInstagramUser(senderId, reply);
-          } catch (err) {
-            console.error('[Instagram DM] Error processing message pipeline:', err.message);
+            try {
+              await processAndStoreMemory('user', userMessage, 'instagram');
+              const reply = await generateLunaConsciousResponse(userMessage, 'instagram');
+              await processAndStoreMemory('model', reply, 'instagram');
+              await replyToInstagramUser(senderId, reply);
+            } catch (err) {
+              console.error('[Instagram DM] Error processing message:', err.message);
+            }
           }
         }
       }
-    }
+    })();
   }
 });
 
-// Helper Function: Send DM reply via Meta Graph API
+// Helper: Send DM reply via Meta Graph API
 async function replyToInstagramUser(recipientId, text) {
+  const token = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN;
+  
   try {
     await axios.post(
-      `https://graph.facebook.com/v20.0/me/messages`,
+      `https://graph.instagram.com/v22.0/me/messages`,
       {
         recipient: { id: recipientId },
         message: { text: text },
       },
       {
         headers: {
-          'Authorization': `Bearer ${process.env.INSTAGRAM_ACCESS_TOKEN}`,
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       }
@@ -293,9 +276,8 @@ async function replyToInstagramUser(recipientId, text) {
   }
 }
 
-
 // ==========================================
-// 5. EXPRESS SERVER & WEBSITE API (Platform: Web)
+// 5. EXPRESS SERVER & WEBSITE API
 // ==========================================
 app.get('/', (req, res) => {
   res.send('Luna Unified Centralized Brain Backend is running 24/7! 🌟');
@@ -306,13 +288,8 @@ app.post('/api/agent/chat', async (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
 
-    // Store web user message to compact short-term log & check permanent facts
     await processAndStoreMemory('user', message, 'website');
-
-    // Generate conscious response
     const reply = await generateLunaConsciousResponse(message, 'website');
-
-    // Store Luna's reply to compact short-term log
     await processAndStoreMemory('model', reply, 'website');
 
     res.json({ success: true, reply });
