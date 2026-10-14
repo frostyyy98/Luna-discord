@@ -217,42 +217,60 @@ app.get('/api/instagram/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-// Incoming Instagram DM Event Listener (With Debug Log)
+// Incoming Instagram DM Event Listener (Handles both Live DMs & Test Payloads)
 app.post('/api/instagram/webhook', (req, res) => {
   console.log('🚨 RAW POST HIT ON INSTAGRAM WEBHOOK:', JSON.stringify(req.body));
 
-  // 1. Instantly respond 200 OK to Meta to acknowledge receipt
+  // 1. Instantly respond 200 OK to Meta
   res.status(200).send('EVENT_RECEIVED');
 
   const body = req.body;
 
-  // 2. Process message asynchronously in background
   if (body.object === 'instagram' || body.object === 'page') {
     (async () => {
       for (const entry of body.entry || []) {
-        if (!entry.messaging) continue;
         
-        for (const messagingEvent of entry.messaging) {
-          if (messagingEvent.message && messagingEvent.message.text && !messagingEvent.message.is_echo) {
-            const senderId = messagingEvent.sender.id;
-            const userMessage = messagingEvent.message.text;
-
-            console.log(`[Instagram DM] Received from ${senderId}: ${userMessage}`);
-
-            try {
-              await processAndStoreMemory('user', userMessage, 'instagram');
-              const reply = await generateLunaConsciousResponse(userMessage, 'instagram');
-              await processAndStoreMemory('model', reply, 'instagram');
-              await replyToInstagramUser(senderId, reply);
-            } catch (err) {
-              console.error('[Instagram DM] Error processing message:', err.message);
+        // Format A: Standard Live DMs (entry.messaging)
+        if (entry.messaging) {
+          for (const messagingEvent of entry.messaging) {
+            if (messagingEvent.message && messagingEvent.message.text && !messagingEvent.message.is_echo) {
+              const senderId = messagingEvent.sender.id;
+              const userMessage = messagingEvent.message.text;
+              await processMessagePipeline(senderId, userMessage);
             }
           }
         }
+
+        // Format B: Meta Dashboard Test Button Payloads (entry.changes)
+        if (entry.changes) {
+          for (const change of entry.changes) {
+            if (change.field === 'messages' && change.value && change.value.message) {
+              const senderId = change.value.sender?.id || 'test_user';
+              const userMessage = change.value.message.text || 'Test message';
+              
+              console.log(`[Instagram Test Event] Simulated message from ${senderId}: ${userMessage}`);
+              await processMessagePipeline(senderId, userMessage);
+            }
+          }
+        }
+
       }
     })();
   }
 });
+
+// Reusable pipeline runner for memory and AI response
+async function processMessagePipeline(senderId, userMessage) {
+  try {
+    console.log(`[Instagram DM Pipeline] Processing: "${userMessage}" from ${senderId}`);
+    await processAndStoreMemory('user', userMessage, 'instagram');
+    const reply = await generateLunaConsciousResponse(userMessage, 'instagram');
+    await processAndStoreMemory('model', reply, 'instagram');
+    await replyToInstagramUser(senderId, reply);
+  } catch (err) {
+    console.error('[Instagram DM Pipeline Error]:', err.message);
+  }
+}
 
 // Helper: Send DM reply via Meta Graph API
 async function replyToInstagramUser(recipientId, text) {
@@ -303,4 +321,4 @@ app.post('/api/agent/chat', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on port ${PORT}`);
 });
-    
+          
