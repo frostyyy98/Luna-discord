@@ -217,8 +217,10 @@ app.get('/api/instagram/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
-// Incoming Instagram DM Event Listener
+// Incoming Instagram DM Event Listener (With Debug Log)
 app.post('/api/instagram/webhook', (req, res) => {
+  console.log('🚨 RAW POST HIT ON INSTAGRAM WEBHOOK:', JSON.stringify(req.body));
+
   // 1. Instantly respond 200 OK to Meta to acknowledge receipt
   res.status(200).send('EVENT_RECEIVED');
 
@@ -301,4 +303,4 @@ app.post('/api/agent/chat', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on port ${PORT}`);
 });
-  
+                  
